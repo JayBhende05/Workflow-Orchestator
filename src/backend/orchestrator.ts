@@ -1,4 +1,4 @@
-import type { QueuedStep, Workflow, WorkflowState } from "../types/workflow"
+import type { QueuedStep, StepStatus, Workflow, WorkflowState } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
 // import { StepQueue, stepQueue } from "../queue/step-queue"
@@ -39,7 +39,6 @@ import { stepQueue, StepQueue } from "../queue/step-queue"
  */
 export class Orchestrator {
   async submitWorkflow(workflow: Workflow): Promise<void> {
-    void workflow
     const state: WorkflowState = {
       workflowId: workflow.workflowId,
       status: "pending",
@@ -56,47 +55,150 @@ export class Orchestrator {
       }
     }
 
-    setWorkflow(workflow.workflowId , state)
-    let readyState = getReadySteps(workflow.steps, {})
-
-    console.log("ReadySteps = " , readyState)
-
-   for(let step of readyState){
-    const newReadyStep : QueuedStep = {
-        "stepId": step.id,
-    workflowId: workflow.workflowId,
-    command: step.command,
-    enqueuedAt: Date.now(),
+    function getStatusMap(data: WorkflowState): Record<string, StepStatus> {
+      let status: Record<string, StepStatus> = {}
+      for (const step of Object.values(data.stepState)) {
+        if (step.status === "COMPLETED") {
+          status[step.stepId] = step.status
+        }
+      }
+      return status
     }
-    console.log("STEP Queue" , newReadyStep);
-    await stepQueue.enqueue(newReadyStep);
-    
+
+    let completedSteps: Record<string, StepStatus> = getStatusMap(state)
+    setWorkflow(workflow.workflowId, state)
+
+    let readyState = getReadySteps(workflow.steps, completedSteps)
+
+    // console.log("ReadySteps = ", readyState)
+
+    for (let step of readyState) {
+      const newReadyStep: QueuedStep = {
+        "stepId": step.id,
+        workflowId: workflow.workflowId,
+        command: step.command,
+        enqueuedAt: Date.now(),
+      }
+      console.log("STEP Queue", newReadyStep);
+
+      await stepQueue.enqueue(newReadyStep);
+
       state.stepState[step.id] = {
-        ...state.stepState[step.id] ,
+        ...state.stepState[step.id],
         status: "QUEUED",
       }
-    
-    console.log("Final STEPS are" , state)
-    
-   } 
+
+      console.log("Final STEPS are", state)
+
+    }
+
+    resultQueue.consume((event) => {
+      console.log("Received result:", event)
+      const worflow = getWorkflow(event.workflowId)
+      if (!worflow) {
+        return
+      }
+
+      switch (event.status) {
+        case "RUNNING":
+          state.stepState[event.stepId] = {
+            ...state.stepState[event.stepId],
+            status: "RUNNING",
+            podId: event.podId
+          }
+
+          break;
+
+        case "COMPLETED":
+          const currentWorkflow = getWorkflow(event.workflowId)
+          if (!currentWorkflow) return
+
+          currentWorkflow.stepState[event.stepId] = {
+            ...currentWorkflow.stepState[event.stepId],
+            status: "COMPLETED",
+            podId: event.podId,
+            stdout: event.stdout,
+            exitCode: event.exitCode,
+          }
+
+          const completedSteps = getStatusMap(currentWorkflow)
+          const readySteps = getReadySteps(
+            currentWorkflow.steps,
+            completedSteps,
+          )
+
+          for (const step of readySteps) {
+            currentWorkflow.stepState[step.id] = {
+              ...currentWorkflow.stepState[step.id],
+              status: "QUEUED",
+            }
+
+            stepQueue.enqueue({
+              stepId: step.id,
+              workflowId: currentWorkflow.workflowId,
+              command: step.command,
+              enqueuedAt: Date.now(),
+            })
+          }
+
+          setWorkflow(currentWorkflow.workflowId, currentWorkflow)
+          break
+      
+
+
+        case "FAILED":
+          state.stepState[event.stepId] = {
+            ...state.stepState[event.stepId],
+            status: "FAILED",
+            podId: event.podId,
+            error: event.error
+          }
+
+          break;
+
+
+        break;
 
 
 
-    
+        default:
+    break;
+}
+
+
+
+
+    })
+
+
+
+
+
 
   }
 
-    
-// void setWorkflow
-// void getReadySteps
-// void stepQueue
-// throw new Error("TODO: implement submitWorkflow")
-  
+
+  async startStepDispatcher(): Promise<void> {
+  while (true) {
+    const step = await stepQueue.dequeue()
+
+    if (!step) {
+      await Bun.sleep(200)
+      continue
+    }
+
+    await podManager.dispatch(step)
+  }
+}
+  // void setWorkflow
+  // void getReadySteps
+  // void stepQueue
+  // throw new Error("TODO: implement submitWorkflow")
+
 
   async start(): Promise < void> {
-  // void resultQueue
-    // void podManager
-    throw new Error("TODO: implement start")
+
+
 }
 }
 

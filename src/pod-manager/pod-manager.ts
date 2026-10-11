@@ -1,6 +1,7 @@
 import type { QueuedStep } from "../types/workflow"
 import { podPool } from "../k8s/pod-pool"
 import { resultQueue } from "../queue/result-queue"
+import { stepQueue } from "../queue/step-queue"
 
 /**
  * TODO: Implement this class.
@@ -24,10 +25,45 @@ import { resultQueue } from "../queue/result-queue"
  */
 export class PodManager {
   async dispatch(step: QueuedStep): Promise<void> {
-    void step
-    void podPool
-    void resultQueue
-    throw new Error("TODO: implement dispatch")
+    console.log("***********INSIDE DISPATCH***********************")
+    const pod = await podPool.acquirePod()
+    const podId = pod.podId
+
+    console.log("Pods accquired are ", podId)
+
+    try {
+      await resultQueue.push({
+        stepId: step.stepId,
+        workflowId: step.workflowId,
+        podId,
+        status: "RUNNING",
+      })
+
+      let stdout = await podPool.execInPod(podId, step.command)
+
+      await resultQueue.push({
+        stepId: step.stepId,
+        workflowId: step.workflowId,
+        podId,
+        status: "COMPLETED",
+        stdout,
+        exitCode: 0
+      })
+
+
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      await resultQueue.push({
+        stepId: step.stepId,
+        workflowId: step.workflowId,
+        podId,
+        status: "FAILED",
+        error: message
+      })
+    }finally{
+      await podPool.releasePod(podId)
+    }
+    
   }
 }
 

@@ -13,7 +13,7 @@ export type Workflow = {
   workflowId: string
   steps: WorkflowStep[],
   status : string,
-  stepState : Record<string ,StepState >
+  stepState : Record<string ,StepState>
 }
 
 export type StepState = {

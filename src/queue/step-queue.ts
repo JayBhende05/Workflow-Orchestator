@@ -28,6 +28,8 @@ export class StepQueue {
 
   async dequeue(): Promise<QueuedStep | null> {
     const value = await redis.rpop(STEP_QUEUE_KEY)
+    console.log("VALUE IN DEQUEUE " , value)
+
     if (!value) return null
 
     return parseQueuedStep(value)

@@ -15,8 +15,8 @@ export function getReadySteps(
   stepStatus: Record<string, StepStatus>
 ): WorkflowStep[] {
   
-  console.log("Steps in ReadySteps" , steps);
-  console.log("StepStatus in readyState" , stepStatus);
+  // console.log("Steps in ReadySteps" , steps);
+  // console.log("StepStatus in readyState" , stepStatus);
    return steps.filter((step) => {
     // Skip steps that have already started or finished
     if (stepStatus[step.id]) {

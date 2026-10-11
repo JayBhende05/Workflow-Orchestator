@@ -4,19 +4,11 @@ import { StepState, WorkflowState, WorkflowStatus } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
 import { orchestrator } from "./orchestrator"
+import { stdout } from "process"
 
 const app = express()
 app.use(express.json())
 
-// {
-//   "workflowId": "wf-123",
-//   "steps": [
-//     { "id": "A", "command": "sleep 2" },
-//     { "id": "B", "command": "ls /",      "dependsOn": ["A"] },
-//     { "id": "C", "command": "pwd",          "dependsOn": ["A"] },
-//     { "id": "D", "command": "date","dependsOn": ["B", "C"] }
-//   ]
-// }
 
 
 
@@ -32,11 +24,7 @@ app.post("/workflow", async (req, res) => {
 
      await orchestrator.submitWorkflow(workflow)
 
-    
-
-
-  // TODO: students implement this in orchestrator.ts
-  // Call orchestrator.submitWorkflow(workflow)
+  
   res.status(501).json({ workflowId: workflow.workflowId , status: "accepted" })
 })
 
@@ -61,6 +49,7 @@ function getWorkflowStatus(
 
   return "running";
 }
+
 app.get("/workflow/:id", (req, res) => {
   const workflowId = req.params.id
   console.log("Workflow id is " , workflowId)
@@ -75,6 +64,8 @@ app.get("/workflow/:id", (req, res) => {
     id: step.id,
     status: workflow.stepState[step.id].status,
     podId: workflow.stepState[step.id].podId,
+    stdout : workflow.stepState[step.id].stdout,
+    exitCode : workflow.stepState[step.id].exitCode
   }));
 
   const status = getWorkflowStatus(workflow.stepState);
@@ -83,6 +74,7 @@ app.get("/workflow/:id", (req, res) => {
     workflowId: workflow.workflowId,
     status,
     steps,
+    
   });
 });
 
@@ -90,9 +82,9 @@ app.get("/workflow/:id", (req, res) => {
 
 
 // GET /pods  — already implemented, useful for debugging
-// app.get("/pods", async (_req, res) => {
-//   const status = podPool.getPoolStatus()
-//   res.json(status)
-// })
+app.get("/pods", async (_req, res) => {
+  const status = podPool.getPoolStatus()
+  res.json(status)
+})
 
 export { app }
