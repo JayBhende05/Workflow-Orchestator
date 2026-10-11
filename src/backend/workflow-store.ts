@@ -8,6 +8,7 @@ export function getWorkflow(workflowId: string): WorkflowState | undefined {
 
 export function setWorkflow(workflowId: string, state: WorkflowState): void {
   store.set(workflowId, state)
+  console.log("Set Workflow is ", store)
 }
 
 export function getAllWorkflows(): WorkflowState[] {

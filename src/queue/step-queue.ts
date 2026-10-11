@@ -21,7 +21,9 @@ function parseQueuedStep(value: string): QueuedStep {
  */
 export class StepQueue {
   async enqueue(step: QueuedStep): Promise<void> {
+    console.log("Pushing into a queue" , step);
     await redis.lpush(STEP_QUEUE_KEY, JSON.stringify(step))
+    console.log("Sucessfully Pushed into a Queue")
   }
 
   async dequeue(): Promise<QueuedStep | null> {

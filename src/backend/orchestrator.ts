@@ -1,9 +1,11 @@
-import type { Workflow } from "../types/workflow"
+import type { QueuedStep, Workflow, WorkflowState } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
-import { stepQueue } from "../queue/step-queue"
+// import { StepQueue, stepQueue } from "../queue/step-queue"
 import { resultQueue } from "../queue/result-queue"
 import { podManager } from "../pod-manager/pod-manager"
+import { read } from "node:fs"
+import { stepQueue, StepQueue } from "../queue/step-queue"
 
 /**
  * TODO: Implement this class.
@@ -12,7 +14,7 @@ import { podManager } from "../pod-manager/pod-manager"
  * the DAG resolver, step queue, result queue, and pod manager.
  *
  * submitWorkflow(workflow):
- *   1. Store workflow in workflow-store with all steps as PENDING
+ *   1. Store workflow in workflow-store with all steps as PENDING D
  *   2. Run getReadySteps() to find immediately runnable steps
  *   3. Push each ready step into the step queue
  *   4. Mark those steps as QUEUED in workflow-store
@@ -38,18 +40,62 @@ import { podManager } from "../pod-manager/pod-manager"
 export class Orchestrator {
   async submitWorkflow(workflow: Workflow): Promise<void> {
     void workflow
-    void getWorkflow
-    void setWorkflow
-    void getReadySteps
-    void stepQueue
-    throw new Error("TODO: implement submitWorkflow")
+    const state: WorkflowState = {
+      workflowId: workflow.workflowId,
+      status: "pending",
+      steps: workflow.steps,
+      stepState: {},
+    }
+
+    for (const step of workflow.steps) {
+      state.stepState[step.id] = {
+        stepId: step.id,
+        status: "PENDING",
+        podId: null,
+        retriesLeft: step.retries ?? 0,
+      }
+    }
+
+    setWorkflow(workflow.workflowId , state)
+    let readyState = getReadySteps(workflow.steps, {"A" : "COMPLETED"})
+
+    console.log("ReadySteps = " , readyState)
+
+   for(let step of readyState){
+    const newReadyStep : QueuedStep = {
+        "stepId": step.id,
+    workflowId: workflow.workflowId,
+    command: step.command,
+    enqueuedAt: Date.now(),
+    }
+    console.log("STEP Queue" , newReadyStep);
+    await stepQueue.enqueue(newReadyStep);
+    
+      state.stepState[step.id] = {
+        ...state.stepState[step.id] ,
+        status: "QUEUED",
+      }
+    
+    console.log("Final STEPS are" , state)
+    
+   } 
+
+    
+
   }
 
-  async start(): Promise<void> {
-    void resultQueue
-    void podManager
+    
+// void setWorkflow
+// void getReadySteps
+// void stepQueue
+// throw new Error("TODO: implement submitWorkflow")
+  
+
+  async start(): Promise < void> {
+  // void resultQueue
+    // void podManager
     throw new Error("TODO: implement start")
-  }
+}
 }
 
 export const orchestrator = new Orchestrator()

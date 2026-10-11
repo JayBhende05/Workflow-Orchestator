@@ -1,18 +1,43 @@
 import express from "express"
 import { podPool } from "../k8s/pod-pool"
+import { WorkflowState } from "../types/workflow"
+import { setWorkflow } from "./workflow-store"
+import { getReadySteps } from "./dag"
+import { orchestrator } from "./orchestrator"
 
 const app = express()
 app.use(express.json())
 
+// {
+//   "workflowId": "wf-123",
+//   "steps": [
+//     { "id": "A", "command": "sleep 2" },
+//     { "id": "B", "command": "ls /",      "dependsOn": ["A"] },
+//     { "id": "C", "command": "pwd",          "dependsOn": ["A"] },
+//     { "id": "D", "command": "date","dependsOn": ["B", "C"] }
+//   ]
+// }
+
+
+
 // POST /workflow
 // Students implement: store workflow, find ready steps, enqueue them
 app.post("/workflow", async (req, res) => {
-  const workflow = req.body
+
+
+    const workflow = req.body;
+    if(!workflow.workflowId){
+      return  res.status(501).json({ error: "Worflow Missing" })
+    }
+
+     await orchestrator.submitWorkflow(workflow)
+
+    
+
 
   // TODO: students implement this in orchestrator.ts
   // Call orchestrator.submitWorkflow(workflow)
-  void workflow
-  res.status(501).json({ error: "Not implemented" })
+  res.status(501).json({ workflowId: workflow.workflowId , status: "accepted" })
 })
 
 // GET /workflow/:id
@@ -26,9 +51,9 @@ app.get("/workflow/:id", (req, res) => {
 })
 
 // GET /pods  — already implemented, useful for debugging
-app.get("/pods", async (_req, res) => {
-  const status = podPool.getPoolStatus()
-  res.json(status)
-})
+// app.get("/pods", async (_req, res) => {
+//   const status = podPool.getPoolStatus()
+//   res.json(status)
+// })
 
 export { app }
