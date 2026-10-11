@@ -57,7 +57,7 @@ export class Orchestrator {
     }
 
     setWorkflow(workflow.workflowId , state)
-    let readyState = getReadySteps(workflow.steps, {"A" : "COMPLETED"})
+    let readyState = getReadySteps(workflow.steps, {})
 
     console.log("ReadySteps = " , readyState)
 
@@ -79,6 +79,8 @@ export class Orchestrator {
     console.log("Final STEPS are" , state)
     
    } 
+
+
 
     
 
