@@ -6,6 +6,7 @@ import { resultQueue } from "../queue/result-queue"
 import { podManager } from "../pod-manager/pod-manager"
 import { read } from "node:fs"
 import { stepQueue, StepQueue } from "../queue/step-queue"
+import { podPool } from "../k8s/pod-pool"
 
 /**
  * TODO: Implement this class.
@@ -38,6 +39,8 @@ import { stepQueue, StepQueue } from "../queue/step-queue"
  * Pod manager only pushes events. Orchestrator reads events and updates state.
  */
 export class Orchestrator {
+  private running = 0;
+
   async submitWorkflow(workflow: Workflow): Promise<void> {
     const state: WorkflowState = {
       workflowId: workflow.workflowId,
@@ -81,14 +84,16 @@ export class Orchestrator {
       }
       console.log("STEP Queue", newReadyStep);
 
-      await stepQueue.enqueue(newReadyStep);
-
-      state.stepState[step.id] = {
+       state.stepState[step.id] = {
         ...state.stepState[step.id],
         status: "QUEUED",
       }
 
-      console.log("Final STEPS are", state)
+      await stepQueue.enqueue(newReadyStep);
+
+     
+
+      console.log("Final STEPS are", state.stepState)
 
     }
 
@@ -143,7 +148,7 @@ export class Orchestrator {
 
           setWorkflow(currentWorkflow.workflowId, currentWorkflow)
           break
-      
+
 
 
         case "FAILED":
@@ -157,13 +162,12 @@ export class Orchestrator {
           break;
 
 
-        break;
 
 
 
         default:
-    break;
-}
+          break;
+      }
 
 
 
@@ -179,27 +183,35 @@ export class Orchestrator {
 
 
   async startStepDispatcher(): Promise<void> {
-  while (true) {
-    const step = await stepQueue.dequeue()
+    const inUsePods = podPool.getPoolStatus().total
 
-    if (!step) {
-      await Bun.sleep(200)
-      continue
+    while (true) {
+
+      if (inUsePods === this.running) {
+        await Bun.sleep(300)
+        continue
+      }
+
+      const step = await stepQueue.dequeue()
+
+      if (!step) {
+        await Bun.sleep(200)
+        continue
+      }
+
+      this.running++
+      podManager
+        .dispatch(step)
+        .catch((err) => console.error("dispatch failed", err))
+        .finally(() => { this.running-- })
     }
-
-    await podManager.dispatch(step)
   }
-}
-  // void setWorkflow
-  // void getReadySteps
-  // void stepQueue
-  // throw new Error("TODO: implement submitWorkflow")
 
 
-  async start(): Promise < void> {
+  async start(): Promise<void> {
 
 
-}
+  }
 }
 
 export const orchestrator = new Orchestrator()
