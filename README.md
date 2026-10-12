@@ -5,7 +5,7 @@ A lightweight workflow orchestration engine built with **Bun**, **Express**, **R
 ## Progress
 
 - [x] Section 1: Core orchestration
-- [ ] Section 2: Parallel execution
+- [x] Section 2: Parallel execution
 - [ ] Section 3: Failure handling, retries, and timeouts
 
 ## Architecture
@@ -29,7 +29,7 @@ flowchart LR
 1. A client submits a workflow through `POST /workflow`.
 2. The orchestrator initializes and stores the workflow, then identifies ready steps using the DAG resolver.
 3. Ready steps are marked `QUEUED` and added to the Redis step queue.
-4. The pod manager leases a runner pod and executes each command.
+4. The dispatcher hands queued steps to the pod manager, up to one per runner pod, without waiting for earlier steps to finish. The pod manager leases a runner pod and executes each command.
 5. Execution events (`RUNNING`, `COMPLETED`, or `FAILED`) are published to the Redis result queue.
 6. The orchestrator consumes these events, updates workflow state, and schedules newly unblocked steps.
 
@@ -96,6 +96,73 @@ Workflow status is derived from the current step statuses:
 | `running` | At least one step is `QUEUED` or `RUNNING` |
 | `completed` | All steps are `COMPLETED` |
 | `failed` | At least one step is `FAILED` |
+
+## Section 2 Implementation
+
+Section 2 runs independent steps at the same time. In the diamond workflow below, B and C both depend only on A, so once A completes they run in parallel on different pods.
+
+```text
+   A
+ /   \
+B     C
+ \   /
+   D
+```
+
+The change is in the dispatcher loop in `src/backend/orchestrator.ts`. The pod manager, result handler, and API are unchanged.
+
+### Parallel Dispatcher
+
+In Section 1 the dispatcher waited for each step to finish before taking the next one. It now starts a step and immediately goes back for the next, until every runner pod is busy.
+
+```text
+loop forever:
+  if running steps >= total pods:  wait briefly, try again   (step stays in Redis)
+  take the next step from the step queue
+  if the queue is empty:           wait briefly, try again
+  running += 1
+  start the step on the pod manager without awaiting it
+    on error:  log it
+    finally:   running -= 1
+```
+
+- **Capacity is checked before dequeuing.** When all pods are busy, waiting steps stay in the Redis step queue, in order, until a pod is released.
+- **Dispatch is not awaited.** Each step runs in the background. A `.catch()` handles its errors and a `.finally()` frees its slot, whether it succeeded or failed.
+
+### Concurrency Counter
+
+The orchestrator keeps its own count of running steps instead of relying on the pod pool's `available` value.
+
+`acquirePod()` contains an `await` before it marks a pod as leased. If the dispatcher read `available` right after starting a step, that step's pod would not be counted yet. With one pod left, the dispatcher could take two steps off the queue, and the second would fail with `NO_POD_AVAILABLE`.
+
+The counter is increased on the same line that starts the step, with no `await` in between, so it is never out of date. This is how the "lease map must be checked atomically" rule is met.
+
+### Queued Before Enqueue
+
+A step is marked `QUEUED` before it is pushed onto the step queue. Steps now start almost instantly, so if the order were reversed, the step's `RUNNING` event could arrive while the push was still being awaited, and would then be overwritten back to `QUEUED`.
+
+### Concurrency Rules
+
+| Rule | How it is met |
+| --- | --- |
+| Run ready steps simultaneously | The dispatcher does not await a step before starting the next |
+| Never assign the same pod to two steps | `acquirePod()` leases each pod to one caller, and the dispatcher never starts more steps than there are pods |
+| Check the lease map atomically | The running-step counter changes on the same line that starts a step |
+| Keep steps queued when no pods are free | Capacity is checked before a step is taken off the queue |
+
+### Execution Timeline
+
+For the Section 2 test workflow (A: `sleep 2`, B and C: `sleep 5`, D: `echo`):
+
+```text
+t=0s   A starts on pod 0
+t=2s   A completes -> B and C are queued together
+t=2s   B starts on pod 0, C starts on pod 1 (parallel)
+t=7s   B and C complete -> D is queued
+t=7s   D starts on pod 0 and completes
+```
+
+Run sequentially this would take about 12 seconds; in parallel it takes about 7.
 
 ## Prerequisites
 
@@ -228,6 +295,85 @@ Expected final result:
 - Successful commands report exit code `0`.
 - Workflow status becomes `completed`.
 
+### Verify Section 2 parallel execution
+
+Submit the diamond workflow:
+
+```bash
+curl -X POST http://localhost:3000/workflow \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowId": "wf-section-2",
+    "steps": [
+      { "id": "A", "command": "sleep 2 && echo A" },
+      { "id": "B", "command": "sleep 5 && echo B", "dependsOn": ["A"] },
+      { "id": "C", "command": "sleep 5 && echo C", "dependsOn": ["A"] },
+      { "id": "D", "command": "echo D", "dependsOn": ["B", "C"] }
+    ]
+  }'
+```
+
+Poll while it runs:
+
+```bash
+curl http://localhost:3000/workflow/wf-section-2
+```
+
+Expected state after A completes. B and C are both `RUNNING`, on different pods:
+
+```json
+{
+  "workflowId": "wf-section-2",
+  "status": "running",
+  "steps": [
+    { "id": "A", "status": "COMPLETED", "podId": "0", "stdout": "A\n", "exitCode": 0 },
+    { "id": "B", "status": "RUNNING", "podId": "0" },
+    { "id": "C", "status": "RUNNING", "podId": "1" },
+    { "id": "D", "status": "PENDING", "podId": null }
+  ]
+}
+```
+
+Expected final state:
+
+```json
+{
+  "workflowId": "wf-section-2",
+  "status": "completed",
+  "steps": [
+    { "id": "A", "status": "COMPLETED", "podId": "0", "stdout": "A\n", "exitCode": 0 },
+    { "id": "B", "status": "COMPLETED", "podId": "0", "stdout": "B\n", "exitCode": 0 },
+    { "id": "C", "status": "COMPLETED", "podId": "1", "stdout": "C\n", "exitCode": 0 },
+    { "id": "D", "status": "COMPLETED", "podId": "0", "stdout": "D\n", "exitCode": 0 }
+  ]
+}
+```
+
+### Verify queuing when all pods are busy
+
+Submit ten independent steps, three more than there are pods:
+
+```bash
+curl -X POST http://localhost:3000/workflow -H "Content-Type: application/json" -d '{
+  "workflowId": "wf-full",
+  "steps": [
+    {"id":"S0","command":"sleep 3 && echo 0"}, {"id":"S1","command":"sleep 3 && echo 1"},
+    {"id":"S2","command":"sleep 3 && echo 2"}, {"id":"S3","command":"sleep 3 && echo 3"},
+    {"id":"S4","command":"sleep 3 && echo 4"}, {"id":"S5","command":"sleep 3 && echo 5"},
+    {"id":"S6","command":"sleep 3 && echo 6"}, {"id":"S7","command":"sleep 3 && echo 7"},
+    {"id":"S8","command":"sleep 3 && echo 8"}, {"id":"S9","command":"sleep 3 && echo 9"}
+  ]
+}'
+```
+
+While it runs, poll `GET /workflow/wf-full` and `GET /pods`. Expected:
+
+- At most 7 steps are `RUNNING` at any moment, each on a different pod.
+- The remaining steps show `QUEUED` with `podId: null` until a pod is released.
+- All 10 steps end `COMPLETED`.
+- `GET /pods` shows `"available": 7` at the end.
+- The server log shows no `NO_POD_AVAILABLE` errors.
+
 ### Inspect Redis queues
 
 Use the queue keys printed when the server starts:
@@ -247,16 +393,18 @@ Replace the example keys with the actual keys from your server logs.
 - **Reliable pod cleanup:** Acquired pods are released in a `finally` block.
 - **Derived workflow status:** Workflow status is calculated from step statuses rather than stored separately.
 - **Asynchronous workflow submission:** The API acknowledges a workflow while execution continues in the background.
+- **Capacity before dequeue:** A step is only taken off the queue when a pod is free to run it, so waiting steps keep their place in Redis.
+- **Own concurrency counter:** The dispatcher counts its running steps itself, because the pod pool's `available` value updates a moment late.
+- **Queued before enqueue:** A step is marked `QUEUED` before it is pushed, so a fast `RUNNING` event can never be overwritten.
 
 ## Current Limitations
 
-- **Sequential execution:** Only one step runs at a time, even when multiple steps are ready.
 - **Failed dependencies:** Dependent steps can remain `PENDING` after an upstream step fails.
 - **No retries or timeout handling:** Failed or stuck executions are not automatically recovered.
+- **A stuck step holds its slot:** A command that never finishes keeps its pod and its place in the running-step count. Section 3 adds lease timeouts to recover it.
 - **In-memory workflow storage:** Workflow state is lost when the server restarts.
-- **Potential blocking execution:** A blocking `kubectl exec` fallback may temporarily delay other HTTP requests.
+- **Potential blocking execution:** The provided pod pool can fall back to a blocking `kubectl exec`. While a command runs this way, other HTTP requests wait, and parallel steps finish one after another even though both show `RUNNING`.
 
 ## Next Steps
 
-- **Section 2:** Execute independent ready steps concurrently, up to available runner pod capacity.
 - **Section 3:** Add failure propagation, skipped steps, retry policies, timeouts, and stuck-execution recovery.
