@@ -6,13 +6,17 @@ A lightweight workflow orchestration engine built with **Bun**, **Express**, **R
 
 - [x] Section 1: Core orchestration
 - [x] Section 2: Parallel execution
-- [ ] Section 3: Failure handling, retries, and timeouts
+- [~] Section 3: Failure handling, retries, and timeouts (failure propagation and skipped steps are done; retries and timeouts are not)
+- [x] Hardening: API key authentication, request validation, structured logging
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client[Client] --> API[Express API]
+    Client[Client] --> Auth[API key check]
+    Auth --> API[Express API]
+    API --> Validation[Zod schema + graph check]
+    Validation --> Orchestrator
     API --> Store[Workflow Store]
     API --> Orchestrator[Orchestrator]
     Orchestrator --> DAG[DAG Resolver]
@@ -26,12 +30,12 @@ flowchart LR
 
 ## How It Works
 
-1. A client submits a workflow through `POST /workflow`.
+1. A client submits a workflow through `POST /workflow` with an `x-api-key` header. The request is authenticated, then validated (schema and dependency graph).
 2. The orchestrator initializes and stores the workflow, then identifies ready steps using the DAG resolver.
 3. Ready steps are marked `QUEUED` and added to the Redis step queue.
 4. The dispatcher hands queued steps to the pod manager, up to one per runner pod, without waiting for earlier steps to finish. The pod manager leases a runner pod and executes each command.
 5. Execution events (`RUNNING`, `COMPLETED`, or `FAILED`) are published to the Redis result queue.
-6. The orchestrator consumes these events, updates workflow state, and schedules newly unblocked steps.
+6. The orchestrator consumes these events, updates workflow state, and schedules newly unblocked steps. If a step fails, every step downstream of it is marked `SKIPPED`.
 
 > **Design principle:** The orchestrator owns workflow state. The pod manager executes commands and reports results without modifying workflow state directly.
 
@@ -86,16 +90,19 @@ The orchestrator runs two background loops: a **result reader** and a **step dis
 ```text
 PENDING → QUEUED → RUNNING → COMPLETED
                             ↘ FAILED
+PENDING → SKIPPED   (an upstream step failed)
 ```
 
-Workflow status is derived from the current step statuses:
+Workflow status is derived from the current step statuses, checked in this order:
 
 | Workflow status | Condition |
 | --- | --- |
+| `failed` | At least one step is `FAILED` **and** no step is `QUEUED` or `RUNNING` |
 | `pending` | All steps are `PENDING` |
-| `running` | At least one step is `QUEUED` or `RUNNING` |
 | `completed` | All steps are `COMPLETED` |
-| `failed` | At least one step is `FAILED` |
+| `running` | Anything else, including a failed step while other branches are still working |
+
+A failure does not end the workflow immediately. Independent branches keep running, and the workflow only reports `failed` once they have finished.
 
 ## Section 2 Implementation
 
@@ -164,6 +171,115 @@ t=7s   D starts on pod 0 and completes
 
 Run sequentially this would take about 12 seconds; in parallel it takes about 7.
 
+## Section 3 Progress: Failure Propagation
+
+When a step fails, the steps that can never run are marked `SKIPPED` instead of staying `PENDING` forever.
+
+`getDownstreamSteps(steps, failedId)` in `src/backend/dag.ts` finds them with a breadth-first search. It starts with the steps whose `dependsOn` includes the failed step, then keeps adding steps that depend on those. A `seen` set stops a step that depends on several failed branches from being added twice.
+
+```text
+   A  ✔
+ /   \
+B ✘    C  ✔        B fails → D is SKIPPED, C still finishes
+ \   /
+   D  ⏭
+```
+
+The `FAILED` case in `handleResult()` marks the failed step, then marks every downstream step `SKIPPED`. Retries and timeouts are still to do.
+
+## Hardening
+
+### Result consumer runs once
+
+The Redis result consumer is started once in `Orchestrator.start()`, and each event goes to `handleResult(event)`. Before this, `resultQueue.consume()` was called inside `submitWorkflow()`, so every submission added another consumer, and the `RUNNING` and `FAILED` cases wrote into the wrong workflow's state. `handleResult` now always looks the workflow up with `getWorkflow(event.workflowId)` and calls `setWorkflow()` in every case.
+
+### Non-blocking `kubectl exec` fallback
+
+The pod pool races the Kubernetes Exec API against a 1-second timeout, then falls back to `kubectl exec`. The fallback used `Bun.spawnSync`, which froze the whole server while a command ran. `runKubectlExec` in `src/k8s/pod-pool.ts` now uses async `Bun.spawn` and reads stdout, stderr and the exit code together, so other requests and parallel steps keep moving.
+
+### Request validation
+
+`POST /workflow` validates the body before anything runs (`src/backend/validation.ts`).
+
+**Schema (zod):**
+
+| Field | Rule |
+| --- | --- |
+| `workflowId` | non-empty string |
+| `steps` | at least 1 step |
+| `steps[].id`, `steps[].command` | non-empty strings |
+| `steps[].dependsOn` | optional array of strings |
+| `steps[].retries` | optional integer, 0 to 5 |
+| `steps[].timeoutMs` | optional positive integer |
+
+**Graph check (`checkGraph`)** returns a list of errors for duplicate step IDs, a `dependsOn` pointing to an ID that does not exist, a step depending on itself, and dependency cycles (found with Kahn's algorithm).
+
+| Response | Meaning |
+| --- | --- |
+| `400 { "errors": [...] }` | Schema error or graph error. All messages are returned together |
+| `409 { "error": "..." }` | A workflow with the same `workflowId` already exists |
+| `202 { "workflowId", "status": "accepted" }` | Accepted for background processing |
+
+`retries` and `timeoutMs` are validated and stored on the step, but the orchestrator does not act on them yet.
+
+### Authentication
+
+This API runs any shell command it receives, so every route requires an API key.
+
+- `src/backend/auth.ts` holds the `requireApiKey` middleware. It reads the `x-api-key` header and returns `401` if it does not match `API_KEY`. The comparison is timing-safe.
+- It is registered with `app.use(requireApiKey)` before the routes, so `GET /workflow/:id` and `GET /pods` are protected too.
+- If `API_KEY` is not set, the server logs an error and exits at startup (`assertApiKeyConfigured()`), so it can never run unprotected by accident.
+
+### Structured logging
+
+All server output goes through `src/utils/logger.ts`, so one workflow's run reads as a timeline:
+
+```text
+HH:MM:SS.mmm  TAG       message
+```
+
+| Tag | What it shows |
+| --- | --- |
+| `HTTP` | One line per request: method, URL, status code, duration. `4xx` lines are highlighted |
+| `WORKFLOW` | Submission with every step and its dependencies, and a closing summary with counts and total time |
+| `STEP` | Every state change: `PENDING → QUEUED → RUNNING → COMPLETED / FAILED / SKIPPED`, with the pod, duration and output |
+| `QUEUE` | Each enqueue (with queue depth) and dequeue |
+| `DISPATCH` | When a step is dispatched and how many pods are in use, and when all pods are busy |
+| `POD` | A pod being leased and released |
+| `SERVER` | Startup messages |
+
+Colors can be turned off with `NO_COLOR=1`. Example output for the diamond workflow:
+
+```text
+────────────────────────────────────────────────────────────────────────
+WORKFLOW wf-section-2
+────────────────────────────────────────────────────────────────────────
+12:00:00.101  WORKFLOW  wf-section-2 submitted with 4 steps
+12:00:00.102  STEP      wf-section-2/A  PENDING → QUEUED (no unmet dependencies)
+12:00:00.110  QUEUE     enqueued wf-section-2/A (queue depth: 1)
+12:00:00.312  DISPATCH  wf-section-2/A dispatched (1/7 pods in use)
+12:00:02.420  STEP      wf-section-2/A  RUNNING → COMPLETED in 2.1s (exit 0) output: "A"
+12:00:02.421  STEP      wf-section-2/B  PENDING → QUEUED (dependencies done: A)
+12:00:02.421  STEP      wf-section-2/C  PENDING → QUEUED (dependencies done: A)
+12:00:07.900  WORKFLOW  wf-section-2 COMPLETED in 7.8s (4 completed, 0 failed, 0 skipped)
+```
+
+## Screenshots
+
+Screenshots of the API responses, server log, and Kubernetes pods go in `docs/images/`. The full list of shots to take, and how to take each one, is in [SCREENSHOTS.md](SCREENSHOTS.md).
+
+| What | Image |
+| --- | --- |
+| Pods ready | ![Runner pods](docs/images/01-runner-pods.png) |
+| Server startup | ![Server startup](docs/images/02-server-startup.png) |
+| Authentication | ![401 without a key](docs/images/03-auth-401.png) |
+| Validation errors | ![400 validation errors](docs/images/05-validation-errors.png) |
+| Sequential workflow log | ![Sequential workflow log](docs/images/07-log-sequential.png) |
+| Parallel execution log | ![Parallel execution log](docs/images/09-log-parallel.png) |
+| Parallel step status | ![B and C running together](docs/images/10-status-parallel.png) |
+| Failure and skipped steps | ![Failure propagation log](docs/images/12-log-failure.png) |
+| Queue when all pods are busy | ![Queue full log](docs/images/14-log-queue-full.png) |
+
 ## Prerequisites
 
 - Docker
@@ -208,17 +324,36 @@ kubectl get pods -n workflow-runner
 
 Expected: `runner-0` through `runner-6` are all `Running`.
 
-### 5. Start the server
+### 5. Set the API key
+
+Copy `.env.example` to `.env` and set a real value for `API_KEY`. Never commit `.env`.
+
+```bash
+cp .env.example .env
+# edit .env and replace API_KEY=change-me with a long random value
+```
+
+Export the same value in the shell you use for `curl`, because the examples below read `$API_KEY`:
+
+```bash
+export API_KEY=<the value from .env>
+```
+
+### 6. Start the server
 
 ```bash
 bun run dev
 ```
 
+The server exits at startup if `API_KEY` is not set.
+
 ## API Endpoints
+
+Every endpoint needs the header `x-api-key: $API_KEY`. Without it, or with the wrong key, the response is `401 { "error": "Unauthorized" }`.
 
 ### `POST /workflow`
 
-Submits a workflow for background execution.
+Submits a workflow for background execution. Returns `202` when accepted, `400` with a list of errors if the body or dependency graph is invalid, and `409` if the `workflowId` already exists.
 
 Example request:
 
@@ -374,6 +509,55 @@ While it runs, poll `GET /workflow/wf-full` and `GET /pods`. Expected:
 - `GET /pods` shows `"available": 7` at the end.
 - The server log shows no `NO_POD_AVAILABLE` errors.
 
+### Verify authentication
+
+```bash
+curl -i http://localhost:3000/pods
+curl -i -H "x-api-key: wrong" http://localhost:3000/pods
+curl -i -H "x-api-key: $API_KEY" http://localhost:3000/pods
+```
+
+Expected: `401`, `401`, then `200`.
+
+### Verify validation
+
+A dependency cycle and a missing dependency in one request:
+
+```bash
+curl -i -X POST http://localhost:3000/workflow -H "x-api-key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowId": "wf-bad",
+    "steps": [
+      { "id": "A", "command": "echo A", "dependsOn": ["B"] },
+      { "id": "B", "command": "echo B", "dependsOn": ["A"] },
+      { "id": "C", "command": "echo C", "dependsOn": ["Z"] }
+    ]
+  }'
+```
+
+Expected: `400` with errors for the unknown step `Z` and the dependency cycle. Submitting `wf-section-1` a second time returns `409`.
+
+### Verify failure propagation
+
+B fails, so D is skipped, while C still runs:
+
+```bash
+curl -X POST http://localhost:3000/workflow -H "x-api-key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowId": "wf-fail",
+    "steps": [
+      { "id": "A", "command": "echo A" },
+      { "id": "B", "command": "exit 1", "dependsOn": ["A"] },
+      { "id": "C", "command": "sleep 3 && echo C", "dependsOn": ["A"] },
+      { "id": "D", "command": "echo D", "dependsOn": ["B", "C"] }
+    ]
+  }'
+```
+
+Expected: A `COMPLETED`, B `FAILED`, C `COMPLETED`, D `SKIPPED`. The workflow status stays `running` while C is working and becomes `failed` once it finishes.
+
 ### Inspect Redis queues
 
 Use the queue keys printed when the server starts:
@@ -399,12 +583,13 @@ Replace the example keys with the actual keys from your server logs.
 
 ## Current Limitations
 
-- **Failed dependencies:** Dependent steps can remain `PENDING` after an upstream step fails.
-- **No retries or timeout handling:** Failed or stuck executions are not automatically recovered.
+- **No retries or timeout handling:** `retries` and `timeoutMs` are validated but not used, so failed or stuck executions are not automatically recovered.
+- **Double execution on fallback:** When the Exec API call loses the 1-second race, it is not cancelled, and the same command is run again through `kubectl exec`. Commands with side effects can run twice.
+- **Shared API key:** Authentication is a single shared key, with no per-user keys or rate limiting.
 - **A stuck step holds its slot:** A command that never finishes keeps its pod and its place in the running-step count. Section 3 adds lease timeouts to recover it.
 - **In-memory workflow storage:** Workflow state is lost when the server restarts.
-- **Potential blocking execution:** The provided pod pool can fall back to a blocking `kubectl exec`. While a command runs this way, other HTTP requests wait, and parallel steps finish one after another even though both show `RUNNING`.
 
 ## Next Steps
 
-- **Section 3:** Add failure propagation, skipped steps, retry policies, timeouts, and stuck-execution recovery.
+- **Section 3:** Add retry policies (`retries`), step timeouts (`timeoutMs`), and stuck-execution recovery.
+- Cancel the Exec API call, or raise its timeout, so the `kubectl exec` fallback does not run a command twice.
