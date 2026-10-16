@@ -18,8 +18,8 @@ async function main(): Promise<void> {
 
   await orchestrator.start()
   void orchestrator.startStepDispatcher().catch((err) => {
-  console.error("Step dispatcher failed:", err)
-})
+    console.error("Step dispatcher failed:", err)
+  })
 
   app.listen(port, () => {
     console.log(`✅ Server running on port ${port}`)
