@@ -1,5 +1,30 @@
 import type { WorkflowStep, StepStatus } from "../types/workflow"
 
+// Every step that directly or transitively depends on failedId (breadth-first search)
+export function getDownstreamSteps(
+  steps: WorkflowStep[],
+  failedId: string
+): WorkflowStep[] {
+  const downstream: WorkflowStep[] = []
+  const seen = new Set<string>([failedId])
+  const queue: string[] = [failedId]
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!
+
+    for (const step of steps) {
+      if (seen.has(step.id)) continue
+      if (!(step.dependsOn ?? []).includes(currentId)) continue
+
+      seen.add(step.id)
+      downstream.push(step)
+      queue.push(step.id)
+    }
+  }
+
+  return downstream
+}
+
 export function getReadySteps(
   steps: WorkflowStep[],
   stepStatus: Record<string, StepStatus>

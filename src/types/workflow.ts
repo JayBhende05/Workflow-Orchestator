@@ -7,13 +7,12 @@ export type WorkflowStep = {
   command: string
   dependsOn?: string[]
   retries?: number
+  timeoutMs?: number
 }
 
 export type Workflow = {
   workflowId: string
-  steps: WorkflowStep[],
-  status : string,
-  stepState : Record<string ,StepState>
+  steps: WorkflowStep[]
 }
 
 export type StepState = {

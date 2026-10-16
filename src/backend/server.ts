@@ -4,7 +4,7 @@ import { StepState, WorkflowState, WorkflowStatus } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
 import { orchestrator } from "./orchestrator"
-import { stdout } from "process"
+import { checkGraph, workflowSchema } from "./validation"
 
 const app = express()
 app.use(express.json())
@@ -17,9 +17,23 @@ app.use(express.json())
 app.post("/workflow", async (req, res) => {
 
 
-    const workflow = req.body;
-    if(!workflow.workflowId){
-      return  res.status(400).json({ error: "Worflow Missing" })
+    const parsed = workflowSchema.safeParse(req.body)
+    if (!parsed.success) {
+      const errors = parsed.error.issues.map(
+        (issue) => `${issue.path.join(".") || "body"}: ${issue.message}`
+      )
+      return res.status(400).json({ errors })
+    }
+
+    const workflow = parsed.data
+
+    const graphErrors = checkGraph(workflow.steps)
+    if (graphErrors.length > 0) {
+      return res.status(400).json({ errors: graphErrors })
+    }
+
+    if (getWorkflow(workflow.workflowId)) {
+      return res.status(409).json({ error: `Workflow "${workflow.workflowId}" already exists` })
     }
 
      await orchestrator.submitWorkflow(workflow)
@@ -35,7 +49,13 @@ function getWorkflowStatus(
 ): WorkflowStatus {
   const states = Object.values(stepState);
 
-  if (states.some((step) => step.status === "FAILED")) {
+  // A failure only ends the workflow once no other branch is still working
+  const hasFailed = states.some((step) => step.status === "FAILED")
+  const hasActive = states.some(
+    (step) => step.status === "QUEUED" || step.status === "RUNNING"
+  )
+
+  if (hasFailed && !hasActive) {
     return "failed";
   }
 

@@ -1,6 +1,6 @@
 import type { QueuedStep, StepResult, StepStatus, Workflow, WorkflowState } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
-import { getReadySteps } from "./dag"
+import { getDownstreamSteps, getReadySteps } from "./dag"
 // import { StepQueue, stepQueue } from "../queue/step-queue"
 import { resultQueue } from "../queue/result-queue"
 import { podManager } from "../pod-manager/pod-manager"
@@ -122,6 +122,15 @@ export class Orchestrator {
           podId: event.podId,
           error: event.error,
         }
+
+        const downstreamSteps = getDownstreamSteps(workflow.steps, event.stepId)
+        for (const step of downstreamSteps) {
+          workflow.stepState[step.id] = {
+            ...workflow.stepState[step.id],
+            status: "SKIPPED",
+          }
+        }
+
         setWorkflow(workflow.workflowId, workflow)
         break
 
