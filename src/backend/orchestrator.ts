@@ -1,11 +1,10 @@
-import type { QueuedStep, StepStatus, Workflow, WorkflowState } from "../types/workflow"
+import type { QueuedStep, StepResult, StepStatus, Workflow, WorkflowState } from "../types/workflow"
 import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
 // import { StepQueue, stepQueue } from "../queue/step-queue"
 import { resultQueue } from "../queue/result-queue"
 import { podManager } from "../pod-manager/pod-manager"
-import { read } from "node:fs"
-import { stepQueue, StepQueue } from "../queue/step-queue"
+import { stepQueue } from "../queue/step-queue"
 import { podPool } from "../k8s/pod-pool"
 
 
@@ -70,90 +69,66 @@ export class Orchestrator {
 
     }
 
-    resultQueue.consume((event) => {
-      console.log("Received result:", event)
-      const worflow = getWorkflow(event.workflowId)
-      if (!worflow) {
-        return
-      }
-
-      switch (event.status) {
-        case "RUNNING":
-          state.stepState[event.stepId] = {
-            ...state.stepState[event.stepId],
-            status: "RUNNING",
-            podId: event.podId
-          }
-
-          break;
-
-        case "COMPLETED":
-          const currentWorkflow = getWorkflow(event.workflowId)
-          if (!currentWorkflow) return
-
-          currentWorkflow.stepState[event.stepId] = {
-            ...currentWorkflow.stepState[event.stepId],
-            status: "COMPLETED",
-            podId: event.podId,
-            stdout: event.stdout,
-            exitCode: event.exitCode,
-          }
-
-          const completedSteps = getStatusMap(currentWorkflow)
-          const readySteps = getReadySteps(
-            currentWorkflow.steps,
-            completedSteps,
-          )
-
-          for (const step of readySteps) {
-            currentWorkflow.stepState[step.id] = {
-              ...currentWorkflow.stepState[step.id],
-              status: "QUEUED",
-            }
-
-            stepQueue.enqueue({
-              stepId: step.id,
-              workflowId: currentWorkflow.workflowId,
-              command: step.command,
-              enqueuedAt: Date.now(),
-            })
-          }
-
-          setWorkflow(currentWorkflow.workflowId, currentWorkflow)
-          break
-
-
-
-        case "FAILED":
-          state.stepState[event.stepId] = {
-            ...state.stepState[event.stepId],
-            status: "FAILED",
-            podId: event.podId,
-            error: event.error
-          }
-
-          break;
-
-
-
-
-
-        default:
-          break;
-      }
-
-
-
-
-    })
-
-
-
-
 
 
   }
 
+  async handleResult(event: StepResult): Promise<void> {
+    console.log("Received result:", event)
+
+    const workflow = getWorkflow(event.workflowId)
+    if (!workflow) return
+
+    switch (event.status) {
+      case "RUNNING":
+        workflow.stepState[event.stepId] = {
+          ...workflow.stepState[event.stepId],
+          status: "RUNNING",
+          podId: event.podId,
+        }
+        setWorkflow(workflow.workflowId, workflow)
+        break
+
+      case "COMPLETED": {
+        workflow.stepState[event.stepId] = {
+          ...workflow.stepState[event.stepId],
+          status: "COMPLETED",
+          podId: event.podId,
+          stdout: event.stdout,
+          exitCode: event.exitCode,
+        }
+
+        const readySteps = getReadySteps(workflow.steps, getStatusMap(workflow))
+        for (const step of readySteps) {
+          workflow.stepState[step.id] = {
+            ...workflow.stepState[step.id],
+            status: "QUEUED",
+          }
+          void stepQueue.enqueue({
+            stepId: step.id,
+            workflowId: workflow.workflowId,
+            command: step.command,
+            enqueuedAt: Date.now(),
+          })
+        }
+        setWorkflow(workflow.workflowId, workflow)
+        break
+      }
+
+      case "FAILED":
+        workflow.stepState[event.stepId] = {
+          ...workflow.stepState[event.stepId],
+          status: "FAILED",
+          podId: event.podId,
+          error: event.error,
+        }
+        setWorkflow(workflow.workflowId, workflow)
+        break
+
+      default:
+        break
+    }
+  }
 
   async startStepDispatcher(): Promise<void> {
     const inUsePods = podPool.getPoolStatus().total
@@ -183,7 +158,7 @@ export class Orchestrator {
 
   async start(): Promise<void> {
 
-
+    resultQueue.consume((event) => this.handleResult(event))
   }
 }
 

@@ -54,8 +54,8 @@ function getServiceAccountToken(namespace: string): string | undefined {
   return token.length > 0 ? token : undefined
 }
 
-function runKubectlExec(namespace: string, podName: string, command: string): string {
-  const execProcess = Bun.spawnSync([
+async function runKubectlExec(namespace: string, podName: string, command: string): Promise<string> {
+  const execProcess = Bun.spawn([
     "kubectl",
     "exec",
     "-n",
@@ -69,10 +69,14 @@ function runKubectlExec(namespace: string, podName: string, command: string): st
     command,
   ])
 
-  const stdout = execProcess.stdout.toString()
-  const stderr = execProcess.stderr.toString()
+  // Read both pipes while waiting for exit so a full pipe buffer cannot stall the process
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(execProcess.stdout).text(),
+    new Response(execProcess.stderr).text(),
+    execProcess.exited,
+  ])
 
-  if (execProcess.exitCode !== 0) throw new Error(stderr || `Command exited with ${execProcess.exitCode}`)
+  if (exitCode !== 0) throw new Error(stderr || `Command exited with ${exitCode}`)
 
   return stdout
 }
@@ -178,7 +182,7 @@ export class PodPool {
       )
     } catch (error) {
       console.log(`⚠️ Kubernetes Exec API failed for ${podName}; falling back to kubectl exec`)
-      return runKubectlExec(this.namespace, podName, command)
+      return await runKubectlExec(this.namespace, podName, command)
     }
 
     const stdout = stdoutChunks.join("")

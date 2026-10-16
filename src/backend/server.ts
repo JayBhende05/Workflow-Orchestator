@@ -19,13 +19,13 @@ app.post("/workflow", async (req, res) => {
 
     const workflow = req.body;
     if(!workflow.workflowId){
-      return  res.status(501).json({ error: "Worflow Missing" })
+      return  res.status(400).json({ error: "Worflow Missing" })
     }
 
      await orchestrator.submitWorkflow(workflow)
 
   
-  res.status(501).json({ workflowId: workflow.workflowId , status: "accepted" })
+  res.status(202).json({ workflowId: workflow.workflowId , status: "accepted" })
 })
 
 // GET /workflow/:id
