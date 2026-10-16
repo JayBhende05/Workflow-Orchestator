@@ -1,5 +1,6 @@
 import type { QueuedStep } from "../types/workflow"
 import { redis } from "./redis-client"
+import { log } from "../utils/logger"
 
 const QUEUE_NAMESPACE = process.env.REDIS_QUEUE_PREFIX || `workflow:${process.pid}`
 const STEP_QUEUE_KEY = `${QUEUE_NAMESPACE}:step-queue`
@@ -21,18 +22,18 @@ function parseQueuedStep(value: string): QueuedStep {
  */
 export class StepQueue {
   async enqueue(step: QueuedStep): Promise<void> {
-    console.log("Pushing into a queue" , step);
-    await redis.lpush(STEP_QUEUE_KEY, JSON.stringify(step))
-    console.log("Sucessfully Pushed into a Queue")
+    const depth = await redis.lpush(STEP_QUEUE_KEY, JSON.stringify(step))
+    log.info("QUEUE", `enqueued ${step.workflowId}/${step.stepId} (queue depth: ${depth})`)
   }
 
   async dequeue(): Promise<QueuedStep | null> {
     const value = await redis.rpop(STEP_QUEUE_KEY)
-    console.log("VALUE IN DEQUEUE " , value)
 
     if (!value) return null
 
-    return parseQueuedStep(value)
+    const step = parseQueuedStep(value)
+    log.info("QUEUE", `dequeued ${step.workflowId}/${step.stepId}`)
+    return step
   }
 
   async peek(): Promise<QueuedStep | null> {

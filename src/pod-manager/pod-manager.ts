@@ -1,7 +1,7 @@
 import type { QueuedStep } from "../types/workflow"
 import { podPool } from "../k8s/pod-pool"
 import { resultQueue } from "../queue/result-queue"
-import { stepQueue } from "../queue/step-queue"
+import { log } from "../utils/logger"
 
 /**
  * TODO: Implement this class.
@@ -25,11 +25,11 @@ import { stepQueue } from "../queue/step-queue"
  */
 export class PodManager {
   async dispatch(step: QueuedStep): Promise<void> {
-    console.log("***********INSIDE DISPATCH***********************")
+    const label = `${step.workflowId}/${step.stepId}`
     const pod = await podPool.acquirePod()
     const podId = pod.podId
 
-    console.log("Pods accquired are ", podId)
+    log.info("POD", `${label} leased pod ${podId} (${pod.podName}) → running: ${step.command}`)
 
     try {
       await resultQueue.push({
@@ -62,6 +62,7 @@ export class PodManager {
       })
     }finally{
       await podPool.releasePod(podId)
+      log.info("POD", `${label} released pod ${podId}`)
     }
     
   }

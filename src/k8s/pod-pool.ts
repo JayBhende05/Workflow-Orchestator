@@ -161,29 +161,46 @@ export class PodPool {
 
     console.log(`📦 execInPod ${podName}: ${command}`)
 
+    // exec() resolves as soon as the websocket connects, NOT when the command ends.
+    // The command has finished only when the API sends its final status frame.
+    let markFinished!: () => void
+    const finished = new Promise<void>((resolve) => { markFinished = resolve })
+
+    let socket: Awaited<ReturnType<Exec["exec"]>>
     try {
-      await Promise.race(
-        [
-          this.execClient.exec(
-            this.namespace,
-            podName,
-            RUNNER_CONTAINER_NAME,
-            ["sh", "-c", command],
-            createCaptureStream(stdoutChunks),
-            createCaptureStream(stderrChunks),
-            null,
-            false,
-            (status) => {
-              if (status.status !== "Success") statusError = getStatusMessage(status) || "Command failed"
-            },
-          ),
-          timeoutAfter(EXEC_API_TIMEOUT_MS),
-        ]
-      )
+      // The timeout only guards the connection, never the command itself
+      socket = await Promise.race([
+        this.execClient.exec(
+          this.namespace,
+          podName,
+          RUNNER_CONTAINER_NAME,
+          ["sh", "-c", command],
+          createCaptureStream(stdoutChunks),
+          createCaptureStream(stderrChunks),
+          null,
+          false,
+          (status) => {
+            if (status.status !== "Success") statusError = getStatusMessage(status) || "Command failed"
+            markFinished()
+          },
+        ),
+        timeoutAfter(EXEC_API_TIMEOUT_MS),
+      ])
     } catch (error) {
-      console.log(`⚠️ Kubernetes Exec API failed for ${podName}; falling back to kubectl exec`)
+      // The command never started, so re-running it through kubectl is safe
+      console.log(`⚠️ Kubernetes Exec API could not connect for ${podName}; falling back to kubectl exec`)
       return await runKubectlExec(this.namespace, podName, command)
     }
+
+    // Wait for the command to really finish. A socket that errors or closes before a
+    // status arrives means the result is unknown, so fail instead of returning "".
+    await Promise.race([
+      finished,
+      new Promise<never>((_, reject) => {
+        socket.once("error", (err: Error) => reject(new Error(`Exec stream error: ${err.message}`)))
+        socket.once("close", () => reject(new Error("Exec stream closed before the command finished")))
+      }),
+    ])
 
     const stdout = stdoutChunks.join("")
     const stderr = stderrChunks.join("")

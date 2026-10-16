@@ -1,3 +1,4 @@
+import { log } from "./utils/logger"
 import { orchestrator } from "./backend/orchestrator"
 import { assertApiKeyConfigured } from "./backend/auth"
 import { app } from "./backend/server"
@@ -10,24 +11,24 @@ async function main(): Promise<void> {
   assertApiKeyConfigured()
 
   await redis.ping()
-  console.log("✅ Redis connected")
+  log.success("SERVER", "Redis connected")
 
   await podPool.ready
   const status = podPool.getPoolStatus()
-  console.log(`✅ Pod pool ready: ${status.total} pods`)
+  log.success("SERVER", `Pod pool ready: ${status.total} pods`)
 
   const port = process.env.PORT || 3000
   const redisHost = process.env.REDIS_HOST || "localhost"
 
   await orchestrator.start()
   void orchestrator.startStepDispatcher().catch((err) => {
-    console.error("Step dispatcher failed:", err)
+    log.error("DISPATCH", `Step dispatcher failed: ${err}`)
   })
 
   app.listen(port, () => {
-    console.log(`✅ Server running on port ${port}`)
-    console.log(`✅ Redis host: ${redisHost}`)
-    console.log(`✅ Pod count: ${status.total}`)
+    log.success("SERVER", `Server running on port ${port}`)
+    log.info("SERVER", `Redis host: ${redisHost}`)
+    log.info("SERVER", `Pod count: ${status.total}`)
   })
 }
 

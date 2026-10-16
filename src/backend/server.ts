@@ -6,8 +6,20 @@ import { getReadySteps } from "./dag"
 import { orchestrator } from "./orchestrator"
 import { checkGraph, workflowSchema } from "./validation"
 import { requireApiKey } from "./auth"
+import { log } from "../utils/logger"
 
 const app = express()
+// Logs one line per request with its final status code and duration
+app.use((req, res, next) => {
+  const startedAt = Date.now()
+  res.on("finish", () => {
+    const line = `${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - startedAt}ms)`
+    if (res.statusCode >= 400) log.warn("HTTP", line)
+    else log.info("HTTP", line)
+  })
+  next()
+})
+
 app.use(requireApiKey)
 app.use(express.json())
 
@@ -74,7 +86,6 @@ function getWorkflowStatus(
 
 app.get("/workflow/:id", (req, res) => {
   const workflowId = req.params.id
-  console.log("Workflow id is " , workflowId)
   
   const workflow =  getWorkflow(workflowId);
 
