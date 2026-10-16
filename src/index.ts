@@ -1,4 +1,5 @@
 import { orchestrator } from "./backend/orchestrator"
+import { assertApiKeyConfigured } from "./backend/auth"
 import { app } from "./backend/server"
 import { setWorkflow } from "./backend/workflow-store"
 import { podPool } from "./k8s/pod-pool"
@@ -6,6 +7,8 @@ import { redis } from "./queue/redis-client"
 import { Workflow, WorkflowState } from "./types/workflow"
 
 async function main(): Promise<void> {
+  assertApiKeyConfigured()
+
   await redis.ping()
   console.log("✅ Redis connected")
 

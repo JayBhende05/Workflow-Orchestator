@@ -5,8 +5,10 @@ import { getWorkflow, setWorkflow } from "./workflow-store"
 import { getReadySteps } from "./dag"
 import { orchestrator } from "./orchestrator"
 import { checkGraph, workflowSchema } from "./validation"
+import { requireApiKey } from "./auth"
 
 const app = express()
+app.use(requireApiKey)
 app.use(express.json())
 
 

@@ -223,7 +223,7 @@ Submits a workflow for background execution.
 Example request:
 
 ```bash
-curl -X POST http://localhost:3000/workflow \
+curl -X POST http://localhost:3000/workflow -H "x-api-key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "workflowId": "wf-section-1",
@@ -249,7 +249,7 @@ Expected response:
 Returns the current workflow and step statuses.
 
 ```bash
-curl http://localhost:3000/workflow/wf-section-1
+curl -H "x-api-key: $API_KEY" http://localhost:3000/workflow/wf-section-1
 ```
 
 Returns `404` if the workflow ID is unknown.
@@ -259,7 +259,7 @@ Returns `404` if the workflow ID is unknown.
 Shows runner pod availability and active leases.
 
 ```bash
-curl http://localhost:3000/pods
+curl -H "x-api-key: $API_KEY" http://localhost:3000/pods
 ```
 
 Example response when all seven pods are available:
@@ -285,7 +285,7 @@ bun test
 Submit the three-step chain shown above, then poll:
 
 ```bash
-curl http://localhost:3000/workflow/wf-section-1
+curl -H "x-api-key: $API_KEY" http://localhost:3000/workflow/wf-section-1
 ```
 
 Expected final result:
@@ -300,7 +300,7 @@ Expected final result:
 Submit the diamond workflow:
 
 ```bash
-curl -X POST http://localhost:3000/workflow \
+curl -X POST http://localhost:3000/workflow -H "x-api-key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "workflowId": "wf-section-2",
@@ -316,7 +316,7 @@ curl -X POST http://localhost:3000/workflow \
 Poll while it runs:
 
 ```bash
-curl http://localhost:3000/workflow/wf-section-2
+curl -H "x-api-key: $API_KEY" http://localhost:3000/workflow/wf-section-2
 ```
 
 Expected state after A completes. B and C are both `RUNNING`, on different pods:
@@ -354,7 +354,7 @@ Expected final state:
 Submit ten independent steps, three more than there are pods:
 
 ```bash
-curl -X POST http://localhost:3000/workflow -H "Content-Type: application/json" -d '{
+curl -X POST http://localhost:3000/workflow -H "x-api-key: $API_KEY" -H "Content-Type: application/json" -d '{
   "workflowId": "wf-full",
   "steps": [
     {"id":"S0","command":"sleep 3 && echo 0"}, {"id":"S1","command":"sleep 3 && echo 1"},
